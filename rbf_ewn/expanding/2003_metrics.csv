@@ -1,0 +1,2 @@
+Train Start,Train End,Val R2,Test R2,Validation Cumulative Return,Validation Sharpe Ratio,Test Sharpe,Test Return,Final Val Capital,Final Test Capital,Total Val Profit,Total Test Profit,Average PnL,Average PnL (%)
+2003-01-01,2021-12-31,-0.18130073356456355,-0.0006668068320554443,12.545066192753426,2.850318727448234,,0.0,13545066.192753427,1000000.0,12545066.192753427,0.0,0.0,0.0
