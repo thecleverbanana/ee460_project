@@ -126,3 +126,52 @@ def reconstruct_price_and_signals(X_test, y_test_pred, test_positions):
         "short_signals": short_signals,
         "plot_dates": plot_dates
     }
+
+def evaluate_strategy_performance_real_world(y_real, y_real_pred, threshold=0.001, initial_capital=1_000_000):
+    """
+    Evaluate trading performance on real-world data only.
+
+    Parameters:
+        y_real (array-like): Actual log returns
+        y_real_pred (array-like): Predicted log returns
+        threshold (float): Signal threshold for generating long/short positions
+        initial_capital (float): Starting capital
+
+    Returns:
+        - summary (dict): Cumulative return, Sharpe ratio, final capital
+        - capital (dict): Capital growth info
+        - positions (np.ndarray): Strategy positions
+    """
+    import numpy as np
+
+    # Generate positions
+    positions = np.where(y_real_pred > threshold, 1,
+                  np.where(y_real_pred < -threshold, -1, 0))
+
+    # Strategy returns
+    strategy_returns = positions * np.asarray(y_real)
+
+    # Cumulative dollar returns
+    dollar_returns = initial_capital * (np.exp(np.cumsum(strategy_returns)) - 1)
+
+    # Cumulative return percentage
+    cum_return = np.exp(np.cumsum(strategy_returns)) - 1
+
+    # Sharpe ratio
+    std = np.std(strategy_returns)
+    if std == 0:
+        sharpe = 0.0
+    else:
+        sharpe = np.mean(strategy_returns) / std * np.sqrt(252)
+
+    summary = {
+        "Real Cumulative Return": cum_return[-1],
+        "Real Sharpe Ratio": sharpe
+    }
+
+    capital = {
+        "Final Real Capital": dollar_returns[-1] + initial_capital,
+        "Total Real Profit": dollar_returns[-1]
+    }
+
+    return summary, capital, positions

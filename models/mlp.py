@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import os
 import sys
+import random
 sys.path.append(os.path.abspath(".."))
 
 from sklearn.preprocessing import StandardScaler
@@ -13,18 +14,22 @@ from torch.utils.data import Dataset, DataLoader, Subset
 
 from sklearn.metrics import r2_score, root_mean_squared_error
 from utils.loader import load_data_with_logReturn
-from utils.eval import evaluate_strategy_performance,calculate_average_pnl
+from utils.eval import evaluate_strategy_performance_real_world,calculate_average_pnl
+from utils.plotter import long_short_position_graph
+
 
 class MLPDataset(Dataset):
-    def __init__(self, df, feature_cols, target_col, window):
+    def __init__(self, df, feature_cols, target_col, window,stride):
         self.window = window
+        self.stride = stride
         self.features = feature_cols
         self.target = target_col
         self.X, self.y = self.create_features(df)
 
     def create_features(self, df):
         X_list, y_list = [], []
-        for i in range(self.window, len(df) - 1):
+        for i in range(self.window, len(df) - 1, self.stride): 
+            # Slide a window of size `self.window` over the data with step size `self.stride`.
             window_data = df.iloc[i - self.window:i][self.features].values
             X_list.append(window_data.flatten())
             y_list.append(df[self.target].iloc[i + 1])
@@ -62,34 +67,39 @@ class MLPNet(nn.Module):
         return self.net(x)
     
 class MLP_Regression:
-    def __init__(self, csv_path, features, target, train_val_start, train_val_end, test_start, test_end,
+    def __init__(self, csv_path, features, target, 
+                 train_val_test_start, train_val_test_end, 
+                 real_world_start, real_world_end,
                  loader_func=load_data_with_logReturn,
                  config=None):
         
+        # Get default hyper-parameters if None in initialization
         default_config = self._get_default_config()
         self.config = default_config if config is None else {**default_config, **config}
 
         self.csv_path = csv_path
         self.features = features
         self.target = target
-        self.train_val_start = pd.Timestamp(train_val_start)
-        self.train_val_end = pd.Timestamp(train_val_end)
-        self.test_start = pd.Timestamp(test_start)
-        self.test_end = pd.Timestamp(test_end)
+        self.train_val_test_start = pd.Timestamp(train_val_test_start)
+        self.train_val_test_end = pd.Timestamp(train_val_test_end)
+        self.real_world_start = pd.Timestamp(real_world_start)
+        self.real_world_end = pd.Timestamp(real_world_end)
 
         self.loader_func = loader_func
 
-        self.device = self.config["device"]
         self.window = self.config["window"]
-        self.shuffle_train_set = self.config["shuffle_train_set"]
+        self.stride = self.config["stride"]
+        self.shuffle_dataset = self.config["shuffle_train_set"]
         self.batch_size = self.config["batch_size"]
         self.lr = self.config["lr"]
         self.dropout_rate = self.config["dropout_rate"]
         self.epochs = self.config["epochs"]
+        self.device = self.config["device"]
 
         self.scaler = StandardScaler()
         self._load_data_and_setup()
         self._init_model()
+        self.best_model_state = None
 
     def _get_default_config(self):
         if torch.backends.mps.is_available():
@@ -101,8 +111,9 @@ class MLP_Regression:
 
         return {
             "window": 50,
+            "stride": 50,
             "batch_size": 64,
-            "shuffle_train_set": False,
+            "shuffle_dataset": False,
             "lr": 1e-3,
             "epochs": 20,
             "dropout_rate": 0.2,
@@ -113,6 +124,24 @@ class MLP_Regression:
         self.config[key] = value
         setattr(self, key, value)
 
+    def get_indices_by_date_range(self, sample_end_dates, start_date, end_date, name=""):
+        """
+        Return indices where sample_end_dates fall within [start_date, end_date].
+        If no index is found, a warning is printed.
+        """
+        start_date = pd.Timestamp(start_date)
+        end_date = pd.Timestamp(end_date)
+
+        indices = [
+            i for i, date in enumerate(sample_end_dates)
+            if start_date <= date <= end_date
+        ]
+
+        if len(indices) == 0:
+            print(f"[Warning] No {name} samples in interval: {start_date.date()} ~ {end_date.date()}")
+
+        return indices
+
     def _load_data_and_setup(self):
         df = self.loader_func(self.csv_path)
         df_scaled = df.copy()
@@ -120,22 +149,55 @@ class MLP_Regression:
 
         dataset = MLPDataset(df_scaled, self.features, self.target, self.window)
         all_dates = df.index.tolist()
-        sample_end_dates = all_dates[self.window:len(dataset) + self.window]
+        sample_end_dates = [
+            all_dates[i] for i in range(self.window, len(df) - 1, self.stride)
+        ]  # offset by window size
 
-        train_val_indices = [i for i, d in enumerate(sample_end_dates) if self.train_val_start <= d <= self.train_val_end]
-        test_indices = [i for i, d in enumerate(sample_end_dates) if self.test_start <= d <= self.test_end]
+        # --------------------------
+        # Main (Train/Val/Test Split)
+        # --------------------------
+        main_indices = self.get_indices_by_date_range(
+            sample_end_dates,
+            self.train_val_test_start,
+            self.train_val_test_end,
+            name="Train/Val/Test"
+        )
 
-        train_size = int(len(train_val_indices) * 0.8)
-        train_indices = train_val_indices[:train_size]
-        val_indices = train_val_indices[train_size:]
+        if self.shuffle_dataset:
+            random.seed(42)
+            random.shuffle(main_indices)
+        total = len(main_indices)
+        train_end = int(total * 0.7)
+        val_end = int(total * 0.85)
 
-        self.train_loader = DataLoader(Subset(dataset, train_indices), batch_size=self.batch_size, shuffle=self.shuffle_train_set)
+        train_indices = main_indices[:train_end]
+        val_indices = main_indices[train_end:val_end]
+        test_indices = main_indices[val_end:]
+
+        self.train_loader = DataLoader(Subset(dataset, train_indices), batch_size=self.batch_size)
         self.val_loader = DataLoader(Subset(dataset, val_indices), batch_size=self.batch_size)
         self.test_loader = DataLoader(Subset(dataset, test_indices), batch_size=self.batch_size)
 
         self.y_train = [df[self.target].iloc[self.window + i + 1] for i in train_indices]
         self.y_val = [df[self.target].iloc[self.window + i + 1] for i in val_indices]
         self.y_test = [df[self.target].iloc[self.window + i + 1] for i in test_indices]
+
+        # --------------------------
+        # Real-World Evaluation Setup
+        # --------------------------
+        real_world_indices = self.get_indices_by_date_range(
+            sample_end_dates,
+            self.real_world_start,
+            self.real_world_end,
+            name="Real_World"
+        )
+
+        self.real_world_loader = DataLoader(
+            Subset(dataset, real_world_indices), batch_size=self.batch_size
+        )
+
+        self.X_real = df.iloc[[self.window + i + 1 for i in real_world_indices]]
+        self.y_real_world = [df[self.target].iloc[self.window + i + 1] for i in real_world_indices]
 
     def _init_model(self):
         input_size = len(self.features) * self.window
@@ -144,9 +206,13 @@ class MLP_Regression:
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
 
     def train(self):
+        best_val_loss = float("inf")
+        best_model_state = None
+
         for epoch in range(self.epochs):
             self.model.train()
             train_loss = 0.0
+
             for X_batch, y_batch in self.train_loader:
                 X_batch, y_batch = X_batch.to(self.device), y_batch.to(self.device).unsqueeze(1)
                 self.optimizer.zero_grad()
@@ -155,8 +221,10 @@ class MLP_Regression:
                 loss.backward()
                 self.optimizer.step()
                 train_loss += loss.item() * X_batch.size(0)
+
             avg_train_loss = train_loss / len(self.train_loader.dataset)
 
+            # Validation phase
             self.model.eval()
             val_loss = 0.0
             with torch.no_grad():
@@ -165,13 +233,30 @@ class MLP_Regression:
                     val_pred = self.model(X_val)
                     loss = self.criterion(val_pred, y_val)
                     val_loss += loss.item() * X_val.size(0)
+
             avg_val_loss = val_loss / len(self.val_loader.dataset)
 
-            print(f"Epoch {epoch+1}, Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f})")
+            print(f"Epoch {epoch+1:02d} | Train Loss: {avg_train_loss:.6f} | Val Loss: {avg_val_loss:.6f}")
+
+            # Always track the best model on val loss
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                best_model_state = self.model.state_dict()
+                self.best_model_state = best_model_state  # store in class
+
+        # Restore best model weights after all epochs
+        if best_model_state is not None:
+            self.model.load_state_dict(best_model_state)
 
     def predict(self):
+            # Load best model weights if available
+        if hasattr(self, "best_model_state") and self.best_model_state is not None:
+            self.model.load_state_dict(self.best_model_state)
+        else:
+            print("[Warning] best_model_state is None — using current model weights.")
+
         self.model.eval()
-        preds_train, preds_val, preds_test = [], [], []
+        preds_train, preds_val, preds_test, preds_real = [], [], [], []
 
         with torch.no_grad():
             for X_batch, _ in self.train_loader:
@@ -189,10 +274,16 @@ class MLP_Regression:
                 y_pred = self.model(X_batch)
                 preds_test.extend(y_pred.cpu().numpy().flatten())
 
+            for X_batch, _ in self.real_world_loader:
+                X_batch = X_batch.to(self.device)
+                y_pred = self.model(X_batch)
+                preds_real.extend(y_pred.cpu().numpy().flatten())
+
         return (
             np.array(preds_train),
             np.array(preds_val),
-            np.array(preds_test)
+            np.array(preds_test),
+            np.array(preds_real)
         )
 
     def evaluate(self):
@@ -208,25 +299,23 @@ class MLP_Regression:
         }
     
     def run_trading_sim(self):
-        _, y_val_pred, y_test_pred = self.predict()
+        _, _, _, y_real_pred = self.predict()
 
-        returns, capital, test_positions = evaluate_strategy_performance(
-            self.y_val,
-            y_val_pred,
-            self.y_test,
-            y_test_pred
+        summary, capital, positions = evaluate_strategy_performance_real_world(
+            self.y_real_world,
+            y_real_pred
         )
 
-        pnl_result = calculate_average_pnl(test_positions, self.y_test)
+        pnl_result = calculate_average_pnl(positions, self.y_real_world)
 
-        return {
-            "Val Return": returns["Validation Cumulative Return"],
-            "Val Sharpe": returns["Validation Sharpe Ratio"],
-            "Test Return": returns["Test Cumulative Return"],
-            "Test Sharpe": returns["Test Sharpe Ratio"],
-            "Final Val Capital": capital["Final Val Capital"],
-            "Final Test Capital": capital["Final Test Capital"],
+        result = {
+            **summary,
+            **capital,
             "Average PnL": pnl_result["average_pnl"],
             "Average PnL (%)": pnl_result["average_pnl_percent"]
         }
+
+        fig = long_short_position_graph(self.X_real, y_real_pred, self.y_real_world, positions)
+        
+        return result, fig
 

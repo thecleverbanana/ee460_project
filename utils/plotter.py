@@ -58,3 +58,61 @@ def plot_actual_vs_predicted_prices(X_train, y_train, y_train_pred,
         print(f"✓ Plot saved to {save_path}")
     else:
         plt.show()
+
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+def long_short_position_graph(X_real, y_real_true, y_real_pred, positions, title="Real-World Backtest: Actual vs Reconstructed Price"):
+    """
+    Plot actual vs reconstructed price with long/short markers on real-world data.
+
+    Parameters:
+        X_real (pd.DataFrame): Real-world features (must include 'Close' and datetime index)
+        y_real_true (pd.Series): Actual log returns with datetime index
+        y_real_pred (np.ndarray): Predicted log returns
+        real_positions (np.ndarray): Position array (1 = long, -1 = short, 0 = hold)
+        title (str): Plot title
+
+    Returns:
+        fig (matplotlib.figure.Figure): Matplotlib figure object
+    """
+
+    # Long/Short markers
+    long_signals = (positions == 1)
+    short_signals = (positions == -1)
+
+    # Dates and alignment
+    real_dates = y_real_true.index
+    plot_dates = real_dates[1:]
+
+    P_t = X_real["Close"].iloc[:-1].values
+    r_hat_t_plus_1 = y_real_pred[1:]
+    P_hat_t_plus_1 = P_t * np.exp(r_hat_t_plus_1)
+
+    # Ensure same length
+    min_len = min(len(plot_dates), len(P_hat_t_plus_1))
+    plot_dates = plot_dates[:min_len]
+    P_hat_t_plus_1 = P_hat_t_plus_1[:min_len]
+    actual_prices = X_real["Close"].values[:min_len]
+    long_signals = long_signals[1:][:min_len]
+    short_signals = short_signals[1:][:min_len]
+
+    # Plot
+    fig, ax = plt.subplots(figsize=(15, 6))
+    ax.plot(plot_dates, actual_prices, label="Actual Price", alpha=0.7)
+    ax.plot(plot_dates, P_hat_t_plus_1, label="Reconstructed Price", linestyle="--", alpha=0.7)
+
+    ax.scatter(plot_dates[long_signals], actual_prices[long_signals], marker='^', color='green', label='Long Entry', zorder=5)
+    ax.scatter(plot_dates[short_signals], actual_prices[short_signals], marker='v', color='red', label='Short Entry', zorder=5)
+
+    ax.set_title(title)
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Price (USD)")
+    ax.legend()
+    ax.grid(True)
+    fig.tight_layout()
+
+    return fig
+
+
