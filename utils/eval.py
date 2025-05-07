@@ -143,7 +143,8 @@ def evaluate_strategy_performance_real_world(y_real, y_real_pred, threshold=0.00
         - positions (np.ndarray): Strategy positions
     """
     import numpy as np
-
+    y_real_pred = np.asarray(y_real_pred)
+    
     # Generate positions
     positions = np.where(y_real_pred > threshold, 1,
                   np.where(y_real_pred < -threshold, -1, 0))

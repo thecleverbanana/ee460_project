@@ -86,7 +86,7 @@ class MLP_Regression:
 
         self.window = self.config["window"]
         self.stride = self.config["stride"]
-        self.shuffle_dataset = self.config["shuffle_train_set"]
+        self.shuffle_dataset = self.config["shuffle_dataset"]
         self.batch_size = self.config["batch_size"]
         self.lr = self.config["lr"]
         self.dropout_rate = self.config["dropout_rate"]
@@ -110,7 +110,7 @@ class MLP_Regression:
             "window": 50,
             "stride": 50,
             "batch_size": 64,
-            "shuffle_dataset": False,
+            "shuffle_dataset": True,
             "lr": 1e-3,
             "epochs": 20,
             "dropout_rate": 0.2,
@@ -144,7 +144,7 @@ class MLP_Regression:
         df_scaled = df.copy()
         df_scaled[self.features] = self.scaler.fit_transform(df_scaled[self.features])
 
-        dataset = MLPDataset(df_scaled, self.features, self.target, self.window)
+        dataset = MLPDataset(df_scaled, self.features, self.target, self.window, self.stride)
         all_dates = df.index.tolist()
         sample_end_dates = [
             all_dates[i] for i in range(self.window, len(df) - 1, self.stride)
@@ -274,12 +274,8 @@ class MLP_Regression:
 
 class MLP_Simulation:
     def __init__(self, model, scaler, csv_path, features, target,
-                 sim_start_date, sim_end_date,
-                 loader_func=load_data_with_logReturn,
-                 window=50,
-                 stride=1,
-                 batch_size=64,
-                 device=None):
+                 sim_start_date, sim_end_date,loader_func,
+                 window,stride,batch_size,device):
         
         self.model = model.eval()  # Set to eval mode
         self.scaler = scaler
@@ -292,8 +288,8 @@ class MLP_Simulation:
         self.window = window
         self.stride = stride
         self.batch_size = batch_size
-        self.device = device or (torch.device("mps" if torch.cuda.is_available() else "cpu"))
-        
+        self.device = device
+
         self._load_and_prepare_simulation_data()
 
     def _load_and_prepare_simulation_data(self):
@@ -309,27 +305,31 @@ class MLP_Simulation:
             i for i, date in enumerate(sample_end_dates)
             if self.sim_start_date <= date <= self.sim_end_date
         ]
+        # print(sim_indices)
 
         self.sim_loader = DataLoader(
             Subset(dataset, sim_indices), batch_size=self.batch_size
         )
 
-        self.X_sim = df.iloc[[self.window + i + 1 for i in sim_indices]]
-        self.y_sim = [df[self.target].iloc[self.window + i + 1] for i in sim_indices]
+        self.X_real = df.iloc[[self.window + i + 1 for i in sim_indices]]
+        self.y_real = [df["LogReturn"].iloc[self.window + i + 1] for i in sim_indices]
 
     def run_simulation(self):
         preds = []
-        self.model.to(self.device)
+
         with torch.no_grad():
             for X_batch, _ in self.sim_loader:
                 X_batch = X_batch.to(self.device)
                 pred = self.model(X_batch)
                 preds.extend(pred.cpu().numpy().flatten())
+        
+        y_pred = np.array(preds)
 
         summary, capital, positions = evaluate_strategy_performance_real_world(
-            self.y_sim, preds
+            self.y_real, y_pred
         )
-        pnl_result = calculate_average_pnl(positions, self.y_sim)
+
+        pnl_result = calculate_average_pnl(positions, self.y_real)
 
         result = {
             **summary,
@@ -338,5 +338,7 @@ class MLP_Simulation:
             "Average PnL (%)": pnl_result["average_pnl_percent"]
         }
 
-        fig = long_short_position_graph(self.X_sim, preds, self.y_sim, positions)
+        y_true = pd.Series(self.y_real, index=self.X_real.index)
+        fig = long_short_position_graph(self.X_real, y_true, y_pred, positions)
+
         return result, fig
