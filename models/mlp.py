@@ -290,26 +290,34 @@ class MLP_Simulation:
         self._load_and_prepare_simulation_data()
 
     def _load_and_prepare_simulation_data(self):
+        # Load and scale the data
         df = self.loader_func(self.csv_path)
         df_scaled = df.copy()
         df_scaled[self.features] = self.scaler.transform(df_scaled[self.features])
 
+        # Create dataset
         dataset = MLPDataset(df_scaled, self.features, self.target, self.window, self.stride)
         all_dates = df.index.tolist()
         sample_end_dates = [all_dates[i] for i in range(self.window, len(df) - 1, self.stride)]
 
+        # Select samples within the simulation date range
         sim_indices = [
             i for i, date in enumerate(sample_end_dates)
             if self.sim_start_date <= date <= self.sim_end_date
         ]
-        # print(sim_indices)
 
+        # Load the subset of data
         self.sim_loader = DataLoader(
             Subset(dataset, sim_indices), batch_size=self.batch_size
         )
 
-        self.X_real = df.iloc[[self.window + i + 1 for i in sim_indices]]
-        self.y_real = [df["LogReturn"].iloc[self.window + i + 1] for i in sim_indices]
+        # Map back to real DataFrame indices (no +1 here!)
+        df_indices = [self.window + i for i in sim_indices]
+        self.X_real = df.iloc[df_indices].copy()
+        self.X_real.index = df.index[df_indices]  # Ensure datetime index
+
+        self.y_real = df[self.target].iloc[df_indices].copy()
+        self.y_real.index = self.X_real.index  # Match index for plotting
 
     def run_simulation(self):
         preds = []
