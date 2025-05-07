@@ -46,25 +46,21 @@ class MLPDataset(Dataset):
     
 
 class MLPNet(nn.Module):
-    def __init__(self, input_size, dropout_rate):
+    def __init__(self, input_size, hidden_sizes, dropout_rate):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_size, 256),
-            nn.ReLU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(256, 128),
-            nn.ReLU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(64, 32),
-            nn.ReLU(),
-            nn.Linear(32, 1)
-        )
+        layers = []
+        prev_size = input_size
+        for hidden_size in hidden_sizes:
+            layers.append(nn.Linear(prev_size, hidden_size))
+            layers.append(nn.ReLU())
+            layers.append(nn.Dropout(dropout_rate))
+            prev_size = hidden_size
+        layers.append(nn.Linear(prev_size, 1))  # Output layer
+        self.net = nn.Sequential(*layers)
 
     def forward(self, x):
         return self.net(x)
+    
     
 class MLP_Regression:
     def __init__(self, csv_path, features, target, 
@@ -181,7 +177,8 @@ class MLP_Regression:
 
     def _init_model(self):
         input_size = len(self.features) * self.window
-        self.model = MLPNet(input_size, self.dropout_rate).to(self.device)
+        hidden_sizes = self.config.get("hidden_sizes", [256, 128, 64, 32]) # Default
+        self.model = MLPNet(input_size, hidden_sizes, self.dropout_rate).to(self.device)
         self.criterion = nn.MSELoss()
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
 
@@ -216,7 +213,7 @@ class MLP_Regression:
 
             avg_val_loss = val_loss / len(self.val_loader.dataset)
 
-            print(f"Epoch {epoch+1:02d} | Train Loss: {avg_train_loss:.6f} | Val Loss: {avg_val_loss:.6f}")
+            # print(f"Epoch {epoch+1:02d} | Train Loss: {avg_train_loss:.6f} | Val Loss: {avg_val_loss:.6f}")
 
             # Always track the best model on val loss
             if avg_val_loss < best_val_loss:
